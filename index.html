@@ -390,7 +390,18 @@
                 body: formData
             });
 
-            const dados = await resposta.json();
+            const texto = await resposta.text();
+            let dados;
+
+            try {
+                dados = JSON.parse(texto);
+            } catch {
+                dados = {
+                    error: true,
+                    message: 'O servidor retornou uma resposta que não é JSON.',
+                    resposta_servidor: texto || '(resposta vazia)'
+                };
+            }
 
             definirStatus(
                 `${resposta.status} ${resposta.ok ? 'Sucesso' : 'Erro'}`,
