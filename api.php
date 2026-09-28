@@ -13,11 +13,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 const MAX_BASES_UPLOAD = 5;
 const MAX_UPLOAD_BYTES = 2097152; // 2 MB
 
+// Mantém o projeto funcional mesmo sem a extensão mbstring e em versões
+// do PHP anteriores à introdução de array_is_list().
+function textoTamanho($valor)
+{
+    $valor = (string) $valor;
+    return function_exists('mb_strlen') ? mb_strlen($valor, 'UTF-8') : strlen($valor);
+}
+
+function textoMinusculo($valor)
+{
+    $valor = (string) $valor;
+    return function_exists('mb_strtolower') ? mb_strtolower($valor, 'UTF-8') : strtolower($valor);
+}
+
+function ehLista($dados)
+{
+    if (!is_array($dados)) {
+        return false;
+    }
+
+    $indice = 0;
+    foreach ($dados as $chave => $_) {
+        if ($chave !== $indice++) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 $arquivoPadrao = __DIR__ . '/dados.json';
 $diretorioBases = __DIR__ . '/bases';
 
-if (!is_dir($diretorioBases)) {
-    mkdir($diretorioBases, 0775, true);
+if (!is_dir($diretorioBases) && !mkdir($diretorioBases, 0775, true) && !is_dir($diretorioBases)) {
+    erro('Não foi possível criar a pasta de bases. Verifique as permissões de escrita do servidor.', 500);
 }
 
 function responder($dados, $status = 200)
@@ -113,13 +143,16 @@ function carregarUsuarios($arquivo)
 
 function salvarUsuarios($arquivo, $usuarios)
 {
-    $resultado = file_put_contents(
-        $arquivo,
-        json_encode(array_values($usuarios), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-    );
+    $json = json_encode(array_values($usuarios), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+    if ($json === false) {
+        erro('Não foi possível converter os dados para JSON.', 500);
+    }
+
+    $resultado = @file_put_contents($arquivo, $json, LOCK_EX);
 
     if ($resultado === false) {
-        erro('Não foi possível salvar a base de dados.', 500);
+        erro('Não foi possível salvar a base de dados. Verifique a permissão de escrita do arquivo e da pasta.', 500);
     }
 }
 
@@ -144,9 +177,9 @@ function validarUsuario($dados, $parcial = false)
 
         if ($nome === '') {
             $erros['nome'] = 'O nome é obrigatório.';
-        } elseif (mb_strlen($nome) < 3) {
+        } elseif (textoTamanho($nome) < 3) {
             $erros['nome'] = 'O nome deve ter pelo menos 3 caracteres.';
-        } elseif (mb_strlen($nome) > 100) {
+        } elseif (textoTamanho($nome) > 100) {
             $erros['nome'] = 'O nome deve ter no máximo 100 caracteres.';
         }
     }
@@ -178,7 +211,7 @@ function validarUsuario($dados, $parcial = false)
 
 function validarBaseImportada($dados)
 {
-    if (!is_array($dados) || !array_is_list($dados)) {
+    if (!is_array($dados) || !ehLista($dados)) {
         return ['base' => 'O JSON deve ter um array de usuários na raiz.'];
     }
 
@@ -317,7 +350,17 @@ if ($action === 'upload-base') {
         erro('Já existe uma base com esse nome. Renomeie o arquivo e tente novamente.', 409);
     }
 
-    $conteudo = file_get_contents($upload['tmp_name']);
+    $conteudo = @file_get_contents($upload['tmp_name']);
+
+    if ($conteudo === false) {
+        erro('Não foi possível ler o arquivo temporário enviado.', 400);
+    }
+
+    // Remove BOM UTF-8, comum em JSONs exportados por editores/planilhas.
+    if (substr($conteudo, 0, 3) === "\xEF\xBB\xBF") {
+        $conteudo = substr($conteudo, 3);
+    }
+
     $dados = json_decode($conteudo, true);
 
     if (json_last_error() !== JSON_ERROR_NONE) {
@@ -332,13 +375,16 @@ if ($action === 'upload-base') {
 
     $dadosNormalizados = normalizarBaseImportada($dados);
 
-    $salvou = file_put_contents(
-        $destino,
-        json_encode($dadosNormalizados, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-    );
+    $jsonNormalizado = json_encode($dadosNormalizados, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+    if ($jsonNormalizado === false) {
+        erro('Não foi possível converter a base enviada para JSON.', 500);
+    }
+
+    $salvou = @file_put_contents($destino, $jsonNormalizado, LOCK_EX);
 
     if ($salvou === false) {
-        erro('Não foi possível armazenar a base enviada.', 500);
+        erro('Não foi possível armazenar a base enviada. Verifique a permissão de escrita da pasta bases/.', 500);
     }
 
     responder([
@@ -405,18 +451,18 @@ if ($metodo === 'GET') {
     $resultado = $usuarios;
 
     if (isset($_GET['nome']) && trim($_GET['nome']) !== '') {
-        $nome = mb_strtolower(trim($_GET['nome']));
+        $nome = textoMinusculo(trim($_GET['nome']));
 
         $resultado = array_filter($resultado, function ($usuario) use ($nome) {
-            return isset($usuario['nome']) && str_contains(mb_strtolower($usuario['nome']), $nome);
+            return isset($usuario['nome']) && str_contains(textoMinusculo($usuario['nome']), $nome);
         });
     }
 
     if (isset($_GET['email']) && trim($_GET['email']) !== '') {
-        $email = mb_strtolower(trim($_GET['email']));
+        $email = textoMinusculo(trim($_GET['email']));
 
         $resultado = array_filter($resultado, function ($usuario) use ($email) {
-            return isset($usuario['email']) && str_contains(mb_strtolower($usuario['email']), $email);
+            return isset($usuario['email']) && str_contains(textoMinusculo($usuario['email']), $email);
         });
     }
 
@@ -487,7 +533,9 @@ if ($metodo === 'POST') {
         erroValidacao(['email' => 'Este e-mail já está cadastrado.']);
     }
 
-    $ids = array_map(fn($usuario) => (int) ($usuario['id'] ?? 0), $usuarios);
+    $ids = array_map(function ($usuario) {
+        return (int) ($usuario['id'] ?? 0);
+    }, $usuarios);
     $novoId = count($ids) > 0 ? max($ids) + 1 : 1;
 
     $novoUsuario = [
